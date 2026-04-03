@@ -63,6 +63,8 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "opencode-zen": "gemini-3-flash",
     "opencode-go": "glm-5",
     "kilocode": "google/gemini-3-flash-preview",
+    "vertex-ai": "claude-haiku-4-5-20251001",
+    "vertex-gemini": "gemini-2.5-flash",
 }
 
 # OpenRouter app attribution headers
@@ -667,6 +669,36 @@ def _try_codex() -> Tuple[Optional[Any], Optional[str]]:
     return CodexAuxiliaryClient(real_client, _CODEX_AUX_MODEL), _CODEX_AUX_MODEL
 
 
+def _try_vertex_ai() -> Tuple[Optional[Any], Optional[str]]:
+    try:
+        from agent.anthropic_adapter import resolve_vertex_credentials, build_vertex_client
+    except ImportError:
+        return None, None
+
+    proj, _reg = resolve_vertex_credentials()
+    if not proj:
+        return None, None
+    try:
+        vc = build_vertex_client(proj, _reg)
+    except (ImportError, ValueError, Exception):
+        return None, None
+    model = _API_KEY_PROVIDER_AUX_MODELS.get("vertex-ai", "claude-haiku-4-5-20251001")
+    return AnthropicAuxiliaryClient(vc, model, "adc", "vertex-ai://", is_oauth=False), model
+
+
+def _try_vertex_gemini(for_model: Optional[str] = None) -> Tuple[Optional[Any], Optional[str]]:
+    try:
+        from agent.vertex_gemini import build_vertex_gemini_client
+    except ImportError:
+        return None, None
+    try:
+        m = for_model or _API_KEY_PROVIDER_AUX_MODELS.get("vertex-gemini", "gemini-2.5-flash")
+        cli = build_vertex_gemini_client(model_name=m)
+        return cli, cli.model_name
+    except Exception:
+        return None, None
+
+
 def _try_anthropic() -> Tuple[Optional[Any], Optional[str]]:
     try:
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
@@ -964,6 +996,26 @@ def resolve_provider_client(
             client, default_model = _try_anthropic()
             if client is None:
                 logger.warning("resolve_provider_client: anthropic requested but no Anthropic credentials found")
+                return None, None
+            final_model = model or default_model
+            return (_to_async_client(client, final_model) if async_mode else (client, final_model))
+
+        if provider == "vertex-ai":
+            client, default_model = _try_vertex_ai()
+            if client is None:
+                logger.warning(
+                    "resolve_provider_client: vertex-ai requested but VERTEX_PROJECT / AnthropicVertex is unavailable",
+                )
+                return None, None
+            final_model = model or default_model
+            return (_to_async_client(client, final_model) if async_mode else (client, final_model))
+
+        if provider == "vertex-gemini":
+            client, default_model = _try_vertex_gemini(model)
+            if client is None:
+                logger.warning(
+                    "resolve_provider_client: vertex-gemini requested but Vertex Gemini is unavailable",
+                )
                 return None, None
             final_model = model or default_model
             return (_to_async_client(client, final_model) if async_mode else (client, final_model))

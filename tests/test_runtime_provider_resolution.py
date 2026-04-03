@@ -657,3 +657,59 @@ def test_openrouter_provider_not_affected_by_custom_fix(monkeypatch):
 
     resolved = rp.resolve_runtime_provider(requested="openrouter")
     assert resolved["provider"] == "openrouter"
+
+
+def test_resolve_runtime_provider_vertex_ai(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "vertex-ai")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("VERTEX_PROJECT", "test-gcp-project")
+
+    resolved = rp.resolve_runtime_provider(requested="vertex-ai")
+
+    assert resolved["provider"] == "vertex-ai"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["api_key"] == "adc"
+    assert resolved["vertex_project_id"] == "test-gcp-project"
+    assert "vertex-ai://" in resolved["base_url"]
+
+
+def test_resolve_runtime_provider_vertex_gemini(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "vertex-gemini")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("VERTEX_PROJECT", "test-gcp-project")
+
+    resolved = rp.resolve_runtime_provider(requested="vertex-gemini")
+
+    assert resolved["provider"] == "vertex-gemini"
+    assert resolved["api_mode"] == "gemini_generate"
+    assert resolved["api_key"] == "adc"
+    assert resolved["vertex_project_id"] == "test-gcp-project"
+    assert "vertex-gemini://" in resolved["base_url"]
+
+
+def test_resolve_runtime_provider_vertex_ai(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "vertex-ai")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("VERTEX_PROJECT", "test-gcp-project")
+
+    resolved = rp.resolve_runtime_provider(requested="vertex-ai")
+
+    assert resolved["provider"] == "vertex-ai"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["api_key"] == "adc"
+    assert resolved["vertex_project_id"] == "test-gcp-project"
+    assert "vertex-ai://" in resolved["base_url"]
+
+
+def test_resolve_runtime_provider_vertex_gemini(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "vertex-gemini")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("VERTEX_PROJECT", "test-gcp-project")
+
+    resolved = rp.resolve_runtime_provider(requested="vertex-gemini")
+
+    assert resolved["provider"] == "vertex-gemini"
+    assert resolved["api_mode"] == "gemini_generate"
+    assert resolved["api_key"] == "adc"
+    assert resolved["vertex_project_id"] == "test-gcp-project"
+    assert "vertex-gemini://" in resolved["base_url"]

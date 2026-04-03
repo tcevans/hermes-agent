@@ -130,6 +130,25 @@ def get_available_skills() -> Dict[str, List[str]]:
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
 
+def _git_repo_root_for_update_check() -> Optional[Path]:
+    """Resolve the git checkout whose ``origin/main`` we should compare to ``HEAD``.
+
+    Prefer the tree that contains *this* ``hermes_cli`` package (editable installs
+    and normal clones). Falling back to ``$HERMES_HOME/hermes-agent`` only when
+    the running code is not inside a git repo (e.g. flat wheel under
+    ``site-packages``) avoids comparing the wrong directory — a stale nested
+    clone under ``~/.hermes/hermes-agent`` while the user runs a different
+    checkout elsewhere produced bogus \"N commits behind\" banners.
+    """
+    running = Path(__file__).resolve().parent.parent
+    if (running / ".git").exists():
+        return running
+    fallback = get_hermes_home() / "hermes-agent"
+    if (fallback / ".git").exists():
+        return fallback
+    return None
+
+
 def check_for_updates() -> Optional[int]:
     """Check how many commits behind origin/main the local repo is.
 
@@ -138,21 +157,22 @@ def check_for_updates() -> Optional[int]:
     or ``None`` if the check fails or isn't applicable.
     """
     hermes_home = get_hermes_home()
-    repo_dir = hermes_home / "hermes-agent"
     cache_file = hermes_home / ".update_check"
 
-    # Must be a git repo — fall back to project root for dev installs
-    if not (repo_dir / ".git").exists():
-        repo_dir = Path(__file__).parent.parent.resolve()
-    if not (repo_dir / ".git").exists():
+    repo_dir = _git_repo_root_for_update_check()
+    if repo_dir is None:
         return None
+    repo_key = str(repo_dir.resolve())
 
-    # Read cache
+    # Read cache (must match the same git root — invalidate after path changes)
     now = time.time()
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
-            if now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
+            if (
+                cached.get("repo") == repo_key
+                and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
+            ):
                 return cached.get("behind")
     except Exception:
         pass
@@ -183,7 +203,7 @@ def check_for_updates() -> Optional[int]:
 
     # Write cache
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind}))
+        cache_file.write_text(json.dumps({"ts": now, "behind": behind, "repo": repo_key}))
     except Exception:
         pass
 

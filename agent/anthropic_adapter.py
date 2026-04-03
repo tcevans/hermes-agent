@@ -13,6 +13,7 @@ Auth supports:
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
@@ -25,6 +26,70 @@ except ImportError:
     _anthropic_sdk = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_vertex_gcp_region(region: Optional[str]) -> Optional[str]:
+    """Normalize user-entered GCP region strings to Vertex API form (e.g. ``us-east-5`` → ``us-east5``)."""
+    if region is None:
+        return None
+    text = str(region).strip().lower().replace("_", "-")
+    if not text:
+        return None
+    m = re.match(r"^([a-z0-9]+)-([a-z0-9]+)-(\d+)$", text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}{m.group(3)}"
+    return text
+
+
+def resolve_vertex_credentials() -> Tuple[Optional[str], str]:
+    """Return (project_id, region) for Vertex AI (Claude or Gemini).
+
+    Region resolution: ``VERTEX_REGION`` → ``VERTEX_LOCATION`` → ``GCP_LOCATION`` → ``us-east5``.
+    Project: ``VERTEX_PROJECT`` → ``GOOGLE_CLOUD_PROJECT`` → ``GCP_PROJECT``.
+    """
+    project = (
+        os.environ.get("VERTEX_PROJECT", "").strip()
+        or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        or os.environ.get("GCP_PROJECT", "").strip()
+    ) or None
+    raw_region = (
+        os.environ.get("VERTEX_REGION", "").strip()
+        or os.environ.get("VERTEX_LOCATION", "").strip()
+        or os.environ.get("GCP_LOCATION", "").strip()
+    )
+    if raw_region:
+        region = normalize_vertex_gcp_region(raw_region) or raw_region.strip().lower()
+    else:
+        region = "us-east5"
+    return project, region
+
+
+def build_vertex_client(project_id: str, region: str):
+    """Create an ``AnthropicVertex`` client (Application Default Credentials)."""
+    if _anthropic_sdk is None:
+        raise ImportError(
+            "The 'anthropic' package is required for the vertex-ai provider. "
+            "Install it with: pip install 'anthropic>=0.39.0'"
+        )
+    if not project_id or not str(project_id).strip():
+        raise ValueError("Vertex AI requires a GCP project id (set VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT).")
+    try:
+        cls = getattr(_anthropic_sdk, "AnthropicVertex", None)
+    except Exception:
+        cls = None
+    if cls is None:
+        raise ImportError(
+            "AnthropicVertex is not available in this anthropic SDK build. "
+            "Upgrade with: pip install -U 'anthropic>=0.39.0'"
+        )
+    from httpx import Timeout
+
+    return cls(
+        project_id=str(project_id).strip(),
+        region=str(region).strip(),
+        timeout=Timeout(timeout=900.0, connect=10.0),
+    )
+
 
 THINKING_BUDGET = {"xhigh": 32000, "high": 16000, "medium": 8000, "low": 4000}
 ADAPTIVE_EFFORT_MAP = {

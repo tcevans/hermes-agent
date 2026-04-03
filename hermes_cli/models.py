@@ -238,6 +238,17 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "XiaomiMiMo/MiMo-V2-Flash",
         "moonshotai/Kimi-K2-Thinking",
     ],
+    "vertex-ai": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5-20251001",
+    ],
+    "vertex-gemini": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash-001",
+    ],
 }
 
 _PROVIDER_LABELS = {
@@ -258,6 +269,8 @@ _PROVIDER_LABELS = {
     "kilocode": "Kilo Code",
     "alibaba": "Alibaba Cloud (DashScope)",
     "huggingface": "Hugging Face",
+    "vertex-ai": "Vertex AI (Claude)",
+    "vertex-gemini": "Vertex AI (Gemini)",
     "custom": "Custom endpoint",
 }
 
@@ -296,6 +309,10 @@ _PROVIDER_ALIASES = {
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
+    "gcp-vertex-claude": "vertex-ai",
+    "google-vertex-claude": "vertex-ai",
+    "gcp-vertex-gemini": "vertex-gemini",
+    "google-vertex-gemini": "vertex-gemini",
 }
 
 
@@ -329,7 +346,8 @@ def list_available_providers() -> list[dict[str, str]]:
     # Canonical providers in display order
     _PROVIDER_ORDER = [
         "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
-        "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic", "alibaba",
+        "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic",
+        "vertex-ai", "vertex-gemini", "alibaba",
         "opencode-zen", "opencode-go",
         "ai-gateway", "deepseek", "custom",
     ]
@@ -625,6 +643,16 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
         live = _fetch_anthropic_models()
         if live:
             return live
+    if normalized == "vertex-gemini":
+        try:
+            from agent.vertex_gemini import build_vertex_gemini_client
+
+            prov = build_vertex_gemini_client()
+            live = prov.list_models()
+            if live:
+                return live
+        except Exception:
+            pass
     if normalized == "ai-gateway":
         live = _fetch_ai_gateway_models()
         if live:

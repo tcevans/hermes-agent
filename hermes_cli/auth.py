@@ -220,6 +220,22 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("HF_TOKEN",),
         base_url_env_var="HF_BASE_URL",
     ),
+    # Vertex AI — Claude (Anthropic SDK + ADC). Project id names the GCP project.
+    "vertex-ai": ProviderConfig(
+        id="vertex-ai",
+        name="Vertex AI (Claude)",
+        auth_type="api_key",
+        inference_base_url="https://vertex-ai.claude.googleapis.com",
+        api_key_env_vars=("VERTEX_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCP_PROJECT"),
+    ),
+    # Vertex AI — Gemini (google-genai + ADC)
+    "vertex-gemini": ProviderConfig(
+        id="vertex-gemini",
+        name="Vertex AI (Gemini)",
+        auth_type="api_key",
+        inference_base_url="https://vertex-ai.gemini.googleapis.com",
+        api_key_env_vars=("VERTEX_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCP_PROJECT"),
+    ),
 }
 
 
@@ -700,6 +716,10 @@ def resolve_provider(
         "lmstudio": "custom", "lm-studio": "custom", "lm_studio": "custom",
         "ollama": "custom", "vllm": "custom", "llamacpp": "custom",
         "llama.cpp": "custom", "llama-cpp": "custom",
+        "vertex": "vertex-ai",
+        "vertex-ai-claude": "vertex-ai",
+        "gemini-vertex": "vertex-gemini",
+        "vertex_gemini": "vertex-gemini",
     }
     normalized = _PROVIDER_ALIASES.get(normalized, normalized)
 
@@ -741,6 +761,9 @@ def resolve_provider(
         # hijack inference auto-selection unless the user explicitly chooses
         # Copilot/GitHub Models as the provider.
         if pid == "copilot":
+            continue
+        # Both Vertex providers share VERTEX_PROJECT — require explicit provider choice.
+        if pid in ("vertex-ai", "vertex-gemini"):
             continue
         for env_var in pconfig.api_key_env_vars:
             if has_usable_secret(os.getenv(env_var, "")):

@@ -3,6 +3,7 @@ Vertex Gemini Provider for Hermes.
 Uses Google GenAI SDK to access Gemini models via Vertex AI.
 """
 
+import base64
 import json
 import logging
 import os
@@ -16,6 +17,93 @@ from agent.anthropic_adapter import normalize_vertex_gcp_region
 
 logger = logging.getLogger(__name__)
 
+# Gemini 3 / thinking models require echoing thought_signature on prior functionCall parts.
+_SKIP_THOUGHT_SIG_SENTINEL = b"skip_thought_signature_validator"
+
+
+def _tool_call_get(tc: Any, key: str, default: Any = None) -> Any:
+    if isinstance(tc, dict):
+        return tc.get(key, default)
+    return getattr(tc, key, default)
+
+
+def _thought_signature_to_extra_content(raw: Any) -> Optional[Dict[str, Any]]:
+    """Store Vertex thought_signature in Hermes tool_call extra_content (JSON-safe)."""
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        b64 = base64.b64encode(raw).decode("ascii")
+    elif isinstance(raw, str):
+        try:
+            base64.b64decode(raw, validate=True)
+            b64 = raw
+        except (ValueError, TypeError):
+            b64 = base64.b64encode(raw.encode("utf-8")).decode("ascii")
+    else:
+        return None
+    return {"google": {"thought_signature": b64}}
+
+
+def _decode_b64_or_utf8(raw: str) -> bytes:
+    try:
+        return base64.b64decode(raw)
+    except (ValueError, TypeError):
+        return raw.encode("utf-8")
+
+
+def _extra_content_to_thought_signature_bytes(extra: Any) -> Optional[bytes]:
+    if not extra or not isinstance(extra, dict):
+        return None
+    nested = extra.get("google")
+    if isinstance(nested, dict) and nested.get("thought_signature") is not None:
+        raw = nested["thought_signature"]
+    else:
+        raw = extra.get("thought_signature")
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, str):
+        return _decode_b64_or_utf8(raw)
+    return None
+
+
+def _extract_thought_signature_from_part(part: Any) -> Any:
+    sig = getattr(part, "thought_signature", None)
+    if sig is None and hasattr(part, "model_dump"):
+        try:
+            data = part.model_dump(mode="python")
+            sig = data.get("thought_signature")
+        except Exception:
+            pass
+    return sig
+
+
+def _gemini_function_call_part(
+    types: Any,
+    *,
+    name: str,
+    args: dict,
+    call_id: Optional[str],
+    thought_signature: Optional[bytes],
+) -> Any:
+    """Build a Part with FunctionCall + optional thought_signature (required for Gemini 3 on replay)."""
+    fc_kwargs: Dict[str, Any] = {"name": name, "args": args}
+    if call_id:
+        fc_kwargs["id"] = call_id
+    fc = types.FunctionCall(**fc_kwargs)
+    part_kwargs: Dict[str, Any] = {"function_call": fc}
+    relax = os.environ.get("HERMES_VERTEX_GEMINI_RELAX_THOUGHT_SIGNATURE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if thought_signature is not None:
+        part_kwargs["thought_signature"] = thought_signature
+    elif relax:
+        part_kwargs["thought_signature"] = _SKIP_THOUGHT_SIG_SENTINEL
+    return types.Part(**part_kwargs)
+
 # User-facing debug mode via environment variable
 HERMES_DEBUG = os.getenv("HERMES_DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -25,22 +113,66 @@ def debug_print(msg: str):
         print(f"DEBUG [vertex-gemini]: {msg}", file=sys.stderr)
 
 
-def _vertex_tool_calls_to_openai_objects(raw_calls: List[Dict[str, Any]]) -> List[SimpleNamespace]:
+def _vertex_tool_calls_to_openai_objects(raw_calls: List[Any]) -> List[SimpleNamespace]:
     """Hermes expects Chat Completions-style objects (.function.name), not dicts."""
     out: List[SimpleNamespace] = []
     for tc in raw_calls:
-        fn = tc.get("function") or {}
-        out.append(
-            SimpleNamespace(
-                id=tc.get("id"),
-                type=tc.get("type", "function"),
-                function=SimpleNamespace(
-                    name=fn.get("name", ""),
-                    arguments=fn.get("arguments", "{}"),
-                ),
-            )
+        fn = _tool_call_get(tc, "function") or {}
+        if not isinstance(fn, dict):
+            fn = {"name": getattr(fn, "name", ""), "arguments": getattr(fn, "arguments", "{}")}
+        ns = SimpleNamespace(
+            id=_tool_call_get(tc, "id"),
+            type=_tool_call_get(tc, "type", "function"),
+            function=SimpleNamespace(
+                name=fn.get("name", ""),
+                arguments=fn.get("arguments", "{}"),
+            ),
         )
+        ex = _tool_call_get(tc, "extra_content")
+        if ex is not None:
+            ns.extra_content = ex
+        out.append(ns)
     return out
+
+
+def _openai_usage_from_gemini_response(response: Any) -> SimpleNamespace:
+    """Map ``GenerateContentResponse.usage_metadata`` to OpenAI-style usage for ``normalize_usage``."""
+    um = getattr(response, "usage_metadata", None)
+    if um is None:
+        return SimpleNamespace(prompt_tokens=0, completion_tokens=0)
+
+    def _n(*attrs: str) -> int:
+        for a in attrs:
+            v = getattr(um, a, None)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        return 0
+
+    prompt = _n("prompt_token_count", "prompt_tokens")
+    candidates = _n("candidates_token_count", "candidates_tokens")
+    total = _n("total_token_count", "total_tokens")
+    cached = _n("cached_content_token_count")
+    thoughts = _n("thoughts_token_count")
+
+    completion = candidates + thoughts
+    if prompt == 0 and total > 0:
+        prompt = max(0, total - completion)
+
+    details = None
+    if cached > 0:
+        details = SimpleNamespace(cached_tokens=cached, cache_write_tokens=0)
+        prompt_display = prompt + cached
+    else:
+        prompt_display = prompt
+
+    return SimpleNamespace(
+        prompt_tokens=prompt_display,
+        completion_tokens=completion,
+        prompt_tokens_details=details,
+    )
 
 
 def resolve_vertex_gemini_credentials() -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -115,19 +247,28 @@ def _format_messages_for_gemini(hermes_messages: List[Dict[str, Any]]) -> Tuple[
                     parts.append(types.Part.from_text(text=content))
                 
                 for tc in msg["tool_calls"]:
-                    func = tc.get("function", {})
-                    # Vertex AI forbids hyphens in function names
+                    func = _tool_call_get(tc, "function") or {}
+                    if not isinstance(func, dict):
+                        func = {
+                            "name": getattr(func, "name", ""),
+                            "arguments": getattr(func, "arguments", "{}"),
+                        }
                     safe_name = func.get("name", "").replace("-", "_")
-                    
                     try:
                         args = json.loads(func.get("arguments", "{}"))
                     except (json.JSONDecodeError, ValueError):
                         args = {}
-                        
+                    call_id = _tool_call_get(tc, "id")
+                    if isinstance(call_id, str):
+                        call_id = call_id.strip() or None
+                    sig_bytes = _extra_content_to_thought_signature_bytes(_tool_call_get(tc, "extra_content"))
                     parts.append(
-                        types.Part.from_function_call(
+                        _gemini_function_call_part(
+                            types,
                             name=safe_name,
-                            args=args
+                            args=args,
+                            call_id=call_id,
+                            thought_signature=sig_bytes,
                         )
                     )
                 gemini_contents.append(
@@ -332,6 +473,8 @@ class VertexGeminiProvider:
                 create=self.generate
             )
         )
+        self.base_url = f"vertex-gemini://{self.location}"
+        self.api_key = "adc"
 
         logger.debug(
             "Vertex Gemini provider initialized: project=%s, location=%s, model=%s",
@@ -366,11 +509,19 @@ class VertexGeminiProvider:
                 p_count = len(getattr(c, 'parts', []))
                 debug_print(f"  Msg {i} [{role}]: {p_count} parts")
 
+        thinking_config = None
+        if os.environ.get("HERMES_VERTEX_GEMINI_DISABLE_THINKING", "").lower() not in ("1", "true", "yes"):
+            # Gemini 3 + tool use expects thought signatures on functionCall parts; enabling thoughts
+            # matches Vertex docs and helps the API return signatures to echo back on the next turn.
+            if "gemini-3" in (self.model_name or "").lower():
+                thinking_config = types.ThinkingConfig(include_thoughts=True)
+
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=gemini_tools if gemini_tools else None,
             temperature=kwargs.get("temperature", 0.7),
             max_output_tokens=kwargs.get("max_tokens"),
+            thinking_config=thinking_config,
             safety_settings=[
                 types.SafetySetting(
                     category=cat,
@@ -445,14 +596,24 @@ class VertexGeminiProvider:
                                 getattr(fc, "name", ""), getattr(fc, "name", "")
                             )
                             args = getattr(fc, "args", {}) or {}
-                            hermes_tool_calls.append({
-                                "id": f"call_{uuid.uuid4().hex[:12]}",
+                            fc_id = getattr(fc, "id", None)
+                            if not isinstance(fc_id, str) or not fc_id.strip():
+                                fc_id = f"call_{uuid.uuid4().hex[:12]}"
+                            else:
+                                fc_id = fc_id.strip()
+                            sig_raw = _extract_thought_signature_from_part(part)
+                            extra = _thought_signature_to_extra_content(sig_raw)
+                            entry: Dict[str, Any] = {
+                                "id": fc_id,
                                 "type": "function",
                                 "function": {
                                     "name": original_name,
-                                    "arguments": json.dumps(args) if args else "{}"
-                                }
-                            })
+                                    "arguments": json.dumps(args) if args else "{}",
+                                },
+                            }
+                            if extra is not None:
+                                entry["extra_content"] = extra
+                            hermes_tool_calls.append(entry)
                 else:
                     if HERMES_DEBUG:
                         debug_print("Gemini response candidate 0 content or parts are empty")
@@ -495,11 +656,7 @@ class VertexGeminiProvider:
                     message=SimpleNamespace(**message_obj),
                     finish_reason="tool_calls" if hermes_tool_calls else finish_reason
                 )],
-                usage=SimpleNamespace(
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    total_tokens=0
-                )
+                usage=_openai_usage_from_gemini_response(response),
             )
 
             return openai_envelope

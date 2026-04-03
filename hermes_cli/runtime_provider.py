@@ -97,7 +97,7 @@ def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
         return "chat_completions"
 
 
-_VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages"}
+_VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages", "gemini_generate"}
 
 
 def _parse_api_mode(raw: Any) -> Optional[str]:
@@ -362,6 +362,56 @@ def resolve_runtime_provider(
             "command": creds.get("command", ""),
             "args": list(creds.get("args") or []),
             "source": creds.get("source", "process"),
+            "requested_provider": requested_provider,
+        }
+
+    # Vertex AI — Claude (Anthropic Messages API via AnthropicVertex + ADC)
+    if provider == "vertex-ai":
+        from agent.anthropic_adapter import resolve_vertex_credentials
+
+        project_id, region = resolve_vertex_credentials()
+        if not project_id:
+            raise AuthError(
+                "Vertex AI (Claude) requires a GCP project id. "
+                "Set VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT and authenticate with "
+                "`gcloud auth application-default login`.",
+                provider=provider,
+                code="missing_vertex_project",
+            )
+        marker = f"vertex-ai://{region}"
+        return {
+            "provider": "vertex-ai",
+            "api_mode": "anthropic_messages",
+            "base_url": marker,
+            "api_key": "adc",
+            "source": "gcp-adc",
+            "vertex_project_id": project_id,
+            "vertex_region": region,
+            "requested_provider": requested_provider,
+        }
+
+    # Vertex AI — Gemini (google-genai)
+    if provider == "vertex-gemini":
+        from agent.anthropic_adapter import resolve_vertex_credentials
+
+        project_id, region = resolve_vertex_credentials()
+        if not project_id:
+            raise AuthError(
+                "Vertex AI (Gemini) requires a GCP project id. "
+                "Set VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT and authenticate with "
+                "`gcloud auth application-default login`.",
+                provider=provider,
+                code="missing_vertex_project",
+            )
+        marker = f"vertex-gemini://{region}"
+        return {
+            "provider": "vertex-gemini",
+            "api_mode": "gemini_generate",
+            "base_url": marker,
+            "api_key": "adc",
+            "source": "gcp-adc",
+            "vertex_project_id": project_id,
+            "vertex_region": region,
             "requested_provider": requested_provider,
         }
 

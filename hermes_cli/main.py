@@ -851,6 +851,8 @@ def cmd_model(args):
         "copilot-acp": "GitHub Copilot ACP",
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
+        "vertex-ai": "Vertex AI (Claude)",
+        "vertex-gemini": "Vertex AI (Gemini)",
         "zai": "Z.AI / GLM",
         "kimi-coding": "Kimi / Moonshot",
         "minimax": "MiniMax",
@@ -878,6 +880,8 @@ def cmd_model(args):
         ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
         ("copilot", "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
         ("anthropic", "Anthropic (Claude models — API key or Claude Code)"),
+        ("vertex-ai", "Vertex AI — Claude (GCP project + ADC)"),
+        ("vertex-gemini", "Vertex AI — Gemini (google-genai + ADC)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
         ("minimax", "MiniMax (global direct API)"),
@@ -958,6 +962,10 @@ def cmd_model(args):
         _remove_custom_provider(config)
     elif selected_provider == "anthropic":
         _model_flow_anthropic(config, current_model)
+    elif selected_provider == "vertex-ai":
+        _model_flow_vertex_ai(config, current_model)
+    elif selected_provider == "vertex-gemini":
+        _model_flow_vertex_gemini(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
     elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
@@ -2061,6 +2069,120 @@ def _model_flow_kimi(config, current_model=""):
         print(f"Default model set to: {selected} (via {endpoint_label})")
     else:
         print("No change.")
+
+
+def _model_flow_vertex_ai(config, current_model=""):
+    """Vertex AI Claude — GCP project + ADC + model."""
+    from hermes_cli.auth import PROVIDER_REGISTRY, _prompt_model_selection, _save_model_choice, deactivate_provider
+    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.models import provider_model_ids
+
+    print("Vertex AI (Claude) — authenticate with: gcloud auth application-default login")
+    print("Optional: pip install 'hermes-agent[vertex]' for Anthropic+Vertex dependencies.")
+    print()
+    proj = (get_env_value("VERTEX_PROJECT") or "").strip()
+    if not proj:
+        try:
+            proj = input("GCP project id (VERTEX_PROJECT): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if proj:
+            save_env_value("VERTEX_PROJECT", proj)
+    if not (get_env_value("VERTEX_PROJECT") or "").strip():
+        print("Cancelled — VERTEX_PROJECT is required.")
+        return
+
+    try:
+        loc = input("Region [us-east5]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    if loc:
+        save_env_value("VERTEX_LOCATION", loc)
+
+    pconfig = PROVIDER_REGISTRY["vertex-ai"]
+    model_list = provider_model_ids("vertex-ai")
+    if not model_list:
+        model_list = [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ]
+    selected = _prompt_model_selection(model_list, current_model=current_model)
+    if not selected:
+        print("No change.")
+        return
+    if get_env_value("OPENAI_BASE_URL"):
+        save_env_value("OPENAI_BASE_URL", "")
+        save_env_value("OPENAI_API_KEY", "")
+    _save_model_choice(selected)
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = "vertex-ai"
+    model["base_url"] = pconfig.inference_base_url.rstrip("/")
+    model["api_mode"] = "anthropic_messages"
+    save_config(cfg)
+    deactivate_provider()
+    print(f"Default model set to: {selected} (Vertex AI Claude)")
+
+
+def _model_flow_vertex_gemini(config, current_model=""):
+    """Vertex Gemini — GCP project + google-genai + ADC."""
+    from hermes_cli.auth import PROVIDER_REGISTRY, _prompt_model_selection, _save_model_choice, deactivate_provider
+    from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
+    from hermes_cli.models import provider_model_ids
+
+    print("Vertex AI (Gemini) — install google-genai: pip install 'hermes-agent[vertex]'")
+    print("Authenticate with: gcloud auth application-default login")
+    print()
+    proj = (get_env_value("VERTEX_PROJECT") or "").strip()
+    if not proj:
+        try:
+            proj = input("GCP project id (VERTEX_PROJECT): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return
+        if proj:
+            save_env_value("VERTEX_PROJECT", proj)
+    if not (get_env_value("VERTEX_PROJECT") or "").strip():
+        print("Cancelled — VERTEX_PROJECT is required.")
+        return
+
+    try:
+        loc = input("Region [blank = gemini default from env]: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return
+    if loc:
+        save_env_value("VERTEX_LOCATION", loc)
+
+    pconfig = PROVIDER_REGISTRY["vertex-gemini"]
+    model_list = provider_model_ids("vertex-gemini")
+    if not model_list:
+        model_list = ["gemini-2.5-flash", "gemini-2.5-pro"]
+    selected = _prompt_model_selection(model_list, current_model=current_model)
+    if not selected:
+        print("No change.")
+        return
+    if get_env_value("OPENAI_BASE_URL"):
+        save_env_value("OPENAI_BASE_URL", "")
+        save_env_value("OPENAI_API_KEY", "")
+    _save_model_choice(selected)
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = "vertex-gemini"
+    model["base_url"] = pconfig.inference_base_url.rstrip("/")
+    model["api_mode"] = "gemini_generate"
+    save_config(cfg)
+    deactivate_provider()
+    print(f"Default model set to: {selected} (Vertex Gemini)")
 
 
 def _model_flow_api_key_provider(config, provider_id, current_model=""):
@@ -3647,7 +3769,12 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=[
+            "auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot",
+            "anthropic", "vertex-ai", "vertex-gemini", "huggingface", "zai", "kimi-coding",
+            "minimax", "minimax-cn", "kilocode", "ai-gateway", "alibaba", "opencode-zen",
+            "opencode-go", "deepseek", "custom",
+        ],
         default=None,
         help="Inference provider (default: auto)"
     )

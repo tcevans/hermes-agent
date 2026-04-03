@@ -892,6 +892,8 @@ def setup_model_provider(config: dict):
         "OpenCode Go (open models, $10/month subscription)",
         "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
         "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
+        "Vertex AI — Claude (GCP project + Application Default Credentials)",
+        "Vertex AI — Gemini (GCP project + google-genai; ADC)",
         "Hugging Face Inference Providers (20+ open models)",
     ]
     if keep_label:
@@ -1536,7 +1538,51 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot-acp", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    elif provider_idx == 16:  # Hugging Face Inference Providers
+    elif provider_idx == 16:  # Vertex AI — Claude
+        selected_provider = "vertex-ai"
+        print()
+        print_header("Vertex AI (Claude)")
+        pconfig = PROVIDER_REGISTRY["vertex-ai"]
+        print_info("Uses Anthropic Claude on Google Cloud Vertex with Application Default Credentials.")
+        print_info("Install: pip install 'hermes-agent[vertex]' (or anthropic[vertex] + google auth).")
+        print_info("Authenticate: gcloud auth application-default login")
+        print()
+        proj = prompt("  GCP project id (VERTEX_PROJECT)").strip()
+        if proj:
+            save_env_value("VERTEX_PROJECT", proj)
+            loc = prompt("  Region (blank = us-east5)").strip()
+            if loc:
+                save_env_value("VERTEX_LOCATION", loc)
+            else:
+                save_env_value("VERTEX_LOCATION", "")
+        if existing_custom:
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "vertex-ai", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    elif provider_idx == 17:  # Vertex AI — Gemini
+        selected_provider = "vertex-gemini"
+        print()
+        print_header("Vertex AI (Gemini)")
+        pconfig = PROVIDER_REGISTRY["vertex-gemini"]
+        print_info("Uses Gemini models on Vertex AI via google-genai + ADC.")
+        print_info("Install: pip install 'hermes-agent[vertex]' (includes google-genai).")
+        print_info("Authenticate: gcloud auth application-default login")
+        print()
+        proj = prompt("  GCP project id (VERTEX_PROJECT)").strip()
+        if proj:
+            save_env_value("VERTEX_PROJECT", proj)
+            loc = prompt("  Region (blank = use VERTEX_LOCATION or us-central1 in code)").strip()
+            if loc:
+                save_env_value("VERTEX_LOCATION", loc)
+        if existing_custom:
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "vertex-gemini", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    elif provider_idx == 18:  # Hugging Face Inference Providers
         selected_provider = "huggingface"
         print()
         print_header("Hugging Face API Token")
@@ -1555,7 +1601,7 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "huggingface", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 17 (Keep current) — only shown when a provider already exists
+    # else: provider_idx == 19 ( Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -1594,6 +1640,8 @@ def setup_model_provider(config: dict):
             "minimax": "MiniMax",
             "minimax-cn": "MiniMax CN",
             "anthropic": "Anthropic",
+            "vertex-ai": "Vertex AI (Claude)",
+            "vertex-gemini": "Vertex AI (Gemini)",
             "ai-gateway": "AI Gateway",
             "custom": "your custom endpoint",
         }
@@ -1764,6 +1812,39 @@ def setup_model_provider(config: dict):
                 if custom:
                     _set_default_model(config, custom)
             # else: keep current
+        elif selected_provider == "vertex-ai":
+            from hermes_cli.models import provider_model_ids
+
+            vid_models = provider_model_ids("vertex-ai") or [
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001",
+            ]
+            model_choices = list(vid_models) + ["Custom model", f"Keep current ({current_model})"]
+            keep_idx = len(model_choices) - 1
+            model_idx = prompt_choice("Select default model:", model_choices, keep_idx)
+            if model_idx < len(vid_models):
+                _set_default_model(config, vid_models[model_idx])
+            elif model_idx == len(vid_models):
+                custom = prompt("Enter Vertex Claude model id")
+                if custom:
+                    _set_default_model(config, custom)
+        elif selected_provider == "vertex-gemini":
+            from hermes_cli.models import provider_model_ids
+
+            vg_models = provider_model_ids("vertex-gemini") or [
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+            ]
+            model_choices = list(vg_models) + ["Custom model", f"Keep current ({current_model})"]
+            keep_idx = len(model_choices) - 1
+            model_idx = prompt_choice("Select default model:", model_choices, keep_idx)
+            if model_idx < len(vg_models):
+                _set_default_model(config, vg_models[model_idx])
+            elif model_idx == len(vg_models):
+                custom = prompt("Enter Gemini model id (e.g., gemini-2.5-flash)")
+                if custom:
+                    _set_default_model(config, custom)
         else:
             # Static list for OpenRouter / fallback (from canonical list)
             from hermes_cli.models import model_ids, menu_labels
@@ -1797,7 +1878,10 @@ def setup_model_provider(config: dict):
     # Write provider+base_url to config.yaml only after model selection is complete.
     # This prevents a race condition where the gateway picks up a new provider
     # before the model name has been updated to match.
-    if selected_provider in ("copilot-acp", "copilot", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic") and selected_base_url is not None:
+    if selected_provider in (
+        "copilot-acp", "copilot", "zai", "kimi-coding", "minimax", "minimax-cn",
+        "kilocode", "anthropic", "vertex-ai", "vertex-gemini",
+    ) and selected_base_url is not None:
         _update_config_for_provider(selected_provider, selected_base_url)
 
     save_config(config)

@@ -582,13 +582,17 @@ class AIAgent:
         self.provider = provider_name or "openrouter"
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
-        if api_mode in {"chat_completions", "codex_responses", "anthropic_messages"}:
+        if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "gemini_generate"}:
             self.api_mode = api_mode
         elif self.provider == "openai-codex":
             self.api_mode = "codex_responses"
         elif (provider_name is None) and "chatgpt.com/backend-api/codex" in self._base_url_lower:
             self.api_mode = "codex_responses"
             self.provider = "openai-codex"
+        elif self.provider == "vertex-gemini":
+            self.api_mode = "gemini_generate"
+        elif self.provider == "vertex-ai":
+            self.api_mode = "anthropic_messages"
         elif self.provider == "anthropic" or (provider_name is None and "api.anthropic.com" in self._base_url_lower):
             self.api_mode = "anthropic_messages"
             self.provider = "anthropic"
@@ -782,26 +786,54 @@ class AIAgent:
         self._anthropic_client = None
         self._is_anthropic_oauth = False
 
-        if self.api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
-            # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
-            # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
-            # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
-            _is_native_anthropic = self.provider == "anthropic"
-            effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
-            self.api_key = effective_key
-            self._anthropic_api_key = effective_key
-            self._anthropic_base_url = base_url
-            from agent.anthropic_adapter import _is_oauth_token as _is_oat
-            self._is_anthropic_oauth = _is_oat(effective_key)
-            self._anthropic_client = build_anthropic_client(effective_key, base_url)
-            # No OpenAI client needed for Anthropic mode
-            self.client = None
+        if self.api_mode == "gemini_generate":
+            from agent.vertex_gemini import build_vertex_gemini_client
+
+            self.client = build_vertex_gemini_client(model_name=self.model)
+            self.api_key = api_key or "adc"
+            self._anthropic_client = None
             self._client_kwargs = {}
             if not self.quiet_mode:
-                print(f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)")
-                if effective_key and len(effective_key) > 12:
-                    print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+                print(f"🤖 AI Agent initialized with model: {self.model} (Vertex Gemini)")
+        elif self.api_mode == "anthropic_messages":
+            from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+            if self.provider == "vertex-ai":
+                from agent.anthropic_adapter import resolve_vertex_credentials, build_vertex_client
+
+                proj, reg = resolve_vertex_credentials()
+                if not proj:
+                    raise ValueError(
+                        "vertex-ai requires VERTEX_PROJECT or GOOGLE_CLOUD_PROJECT and "
+                        "Application Default Credentials (`gcloud auth application-default login`)."
+                    )
+                self._anthropic_client = build_vertex_client(proj, reg)
+                self.api_key = api_key or "adc"
+                self._anthropic_api_key = self.api_key
+                self._anthropic_base_url = base_url
+                self._is_anthropic_oauth = False
+                self.client = None
+                self._client_kwargs = {}
+                if not self.quiet_mode:
+                    print(f"🤖 AI Agent initialized with model: {self.model} (Vertex AI Claude)")
+            else:
+                # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
+                # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
+                # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
+                _is_native_anthropic = self.provider == "anthropic"
+                effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
+                self.api_key = effective_key
+                self._anthropic_api_key = effective_key
+                self._anthropic_base_url = base_url
+                from agent.anthropic_adapter import _is_oauth_token as _is_oat
+                self._is_anthropic_oauth = _is_oat(effective_key)
+                self._anthropic_client = build_anthropic_client(effective_key, base_url)
+                # No OpenAI client needed for Anthropic mode
+                self.client = None
+                self._client_kwargs = {}
+                if not self.quiet_mode:
+                    print(f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)")
+                    if effective_key and len(effective_key) > 12:
+                        print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
         else:
             if api_key and base_url:
                 # Explicit credentials from CLI/gateway — construct directly.
@@ -3784,6 +3816,20 @@ class AIAgent:
                     )
                 elif self.api_mode == "anthropic_messages":
                     result["response"] = self._anthropic_messages_create(api_kwargs)
+                elif self.api_mode == "gemini_generate":
+                    _gkw = {
+                        k: v
+                        for k, v in api_kwargs.items()
+                        if k
+                        in (
+                            "messages",
+                            "tools",
+                            "max_tokens",
+                            "max_completion_tokens",
+                            "temperature",
+                        )
+                    }
+                    result["response"] = self.client.chat.completions.create(**_gkw)
                 else:
                     request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
                     result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
@@ -3804,13 +3850,20 @@ class AIAgent:
                 # seed future retries.
                 try:
                     if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
                         self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                        )
+                        if self.provider == "vertex-ai":
+                            from agent.anthropic_adapter import build_vertex_client, resolve_vertex_credentials
+
+                            _vp, vr = resolve_vertex_credentials()
+                            if _vp:
+                                self._anthropic_client = build_vertex_client(_vp, vr)
+                        else:
+                            from agent.anthropic_adapter import build_anthropic_client
+
+                            self._anthropic_client = build_anthropic_client(
+                                self._anthropic_api_key,
+                                getattr(self, "_anthropic_base_url", None),
+                            )
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -3900,6 +3953,9 @@ class AIAgent:
                 return self._interruptible_api_call(api_kwargs)
             finally:
                 self._codex_on_first_delta = None
+
+        if self.api_mode == "gemini_generate":
+            return self._interruptible_api_call(api_kwargs)
 
         result = {"response": None, "error": None}
         request_client_holder = {"client": None}
@@ -4311,13 +4367,20 @@ class AIAgent:
             if self._interrupt_requested:
                 try:
                     if self.api_mode == "anthropic_messages":
-                        from agent.anthropic_adapter import build_anthropic_client
-
                         self._anthropic_client.close()
-                        self._anthropic_client = build_anthropic_client(
-                            self._anthropic_api_key,
-                            getattr(self, "_anthropic_base_url", None),
-                        )
+                        if self.provider == "vertex-ai":
+                            from agent.anthropic_adapter import build_vertex_client, resolve_vertex_credentials
+
+                            _vp, vr = resolve_vertex_credentials()
+                            if _vp:
+                                self._anthropic_client = build_vertex_client(_vp, vr)
+                        else:
+                            from agent.anthropic_adapter import build_anthropic_client
+
+                            self._anthropic_client = build_anthropic_client(
+                                self._anthropic_api_key,
+                                getattr(self, "_anthropic_base_url", None),
+                            )
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
@@ -4368,9 +4431,13 @@ class AIAgent:
 
             # Determine api_mode from provider / base URL
             fb_api_mode = "chat_completions"
-            fb_base_url = str(fb_client.base_url)
+            fb_base_url = str(getattr(fb_client, "base_url", "") or "")
             if fb_provider == "openai-codex":
                 fb_api_mode = "codex_responses"
+            elif fb_provider == "vertex-gemini":
+                fb_api_mode = "gemini_generate"
+            elif fb_provider == "vertex-ai":
+                fb_api_mode = "anthropic_messages"
             elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
                 fb_api_mode = "anthropic_messages"
             elif self._is_direct_openai_url(fb_base_url):
@@ -4383,17 +4450,40 @@ class AIAgent:
             self.api_mode = fb_api_mode
             self._fallback_activated = True
 
-            if fb_api_mode == "anthropic_messages":
-                # Build native Anthropic client instead of using OpenAI client
-                from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
-                effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
-                self.api_key = effective_key
-                self._anthropic_api_key = effective_key
-                self._anthropic_base_url = getattr(fb_client, "base_url", None)
-                self._anthropic_client = build_anthropic_client(effective_key, self._anthropic_base_url)
-                self._is_anthropic_oauth = _is_oauth_token(effective_key)
-                self.client = None
-                self._client_kwargs = {}
+            if fb_api_mode == "gemini_generate":
+                self.api_key = getattr(fb_client, "api_key", None) or "adc"
+                self.client = fb_client
+                self._anthropic_client = None
+                self._client_kwargs = {
+                    "api_key": self.api_key,
+                    "base_url": fb_base_url,
+                }
+            elif fb_api_mode == "anthropic_messages":
+                if fb_provider == "vertex-ai":
+                    from agent.anthropic_adapter import resolve_vertex_credentials, build_vertex_client
+
+                    _pid, _reg = resolve_vertex_credentials()
+                    if not _pid:
+                        logging.warning("Fallback to vertex-ai failed: missing VERTEX_PROJECT")
+                        return self._try_activate_fallback()
+                    self.api_key = "adc"
+                    self._anthropic_api_key = self.api_key
+                    self._anthropic_base_url = fb_base_url
+                    self._anthropic_client = build_vertex_client(_pid, _reg)
+                    self._is_anthropic_oauth = False
+                    self.client = None
+                    self._client_kwargs = {}
+                else:
+                    # Build native Anthropic client instead of using OpenAI client
+                    from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+                    effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
+                    self.api_key = effective_key
+                    self._anthropic_api_key = effective_key
+                    self._anthropic_base_url = getattr(fb_client, "base_url", None)
+                    self._anthropic_client = build_anthropic_client(effective_key, self._anthropic_base_url)
+                    self._is_anthropic_oauth = _is_oauth_token(effective_key)
+                    self.client = None
+                    self._client_kwargs = {}
             else:
                 # Swap OpenAI client and config in-place
                 self.api_key = fb_client.api_key
@@ -4595,6 +4685,20 @@ class AIAgent:
 
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
+        if self.api_mode == "gemini_generate":
+            prev_mode = self.api_mode
+            self.api_mode = "chat_completions"
+            try:
+                gemini_kwargs = self._build_api_kwargs(api_messages)
+            finally:
+                self.api_mode = prev_mode
+            gemini_kwargs.pop("model", None)
+            gemini_kwargs.pop("timeout", None)
+            gemini_kwargs.pop("extra_body", None)
+            gemini_kwargs.pop("stream", None)
+            gemini_kwargs.pop("stream_options", None)
+            return gemini_kwargs
+
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_kwargs
             anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
@@ -6645,7 +6749,7 @@ class AIAgent:
                         # retries are pointless.  Detect this early and give a
                         # targeted error instead of wasting 3 API calls.
                         _trunc_content = None
-                        if self.api_mode == "chat_completions":
+                        if self.api_mode in ("chat_completions", "gemini_generate"):
                             _trunc_msg = response.choices[0].message if (hasattr(response, "choices") and response.choices) else None
                             _trunc_content = getattr(_trunc_msg, "content", None) if _trunc_msg else None
                         elif self.api_mode == "anthropic_messages":
@@ -6924,6 +7028,7 @@ class AIAgent:
                             continue
                     if (
                         self.api_mode == "anthropic_messages"
+                        and self.provider == "anthropic"
                         and status_code == 401
                         and hasattr(self, '_anthropic_api_key')
                         and not anthropic_auth_retry_attempted
